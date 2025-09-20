@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Mappa – Crimini su veicoli</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
+  <link rel="stylesheet" href="style.css"/>
+  <style>
+    /* --- Layout top bar (Home sx, titolo centrato) --- */
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr; /* sx nav | centro titolo | dx spacer */
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 0; /* nessuna riga sopra */
+    }
+    .topbar .tabs { display: flex; gap: 12px; }
+
+    /* >>> Stile bottone nero per il link Home (senza cambi colore) <<< */
+    .topbar .tabs a,
+    .topbar .tabs a:link,
+    .topbar .tabs a:visited,
+    .topbar .tabs a:hover,
+    .topbar .tabs a:active,
+    .topbar .tabs a:focus {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 6px;
+      background: #fff;
+      color: #000;
+      border: 1px solid #000;
+      font-size: 14px;
+      font-weight: 500;
+      text-decoration: none;
+      outline: none;
+      box-shadow: none;
+      cursor: pointer;
+    }
+
+    .page-title { margin: 0; text-align: center; font-size: 28px; font-weight: 700; }
+    .right-spacer { height: 1px; }
+
+    /* --- Mappa full width --- */
+    html, body { margin: 0; padding: 0; }
+    #mapid {
+      height: calc(100vh - 72px); /* tutta la pagina meno la topbar */
+      width: 100vw;               /* piena larghezza, elimina bordi bianchi */
+      max-width: 100%;
+      margin: 0;                  /* niente margini laterali */
+      border: 0;                  /* nessun bordo */
+      box-shadow: none;           /* niente ombra */
+    }
+
+    /* --- Legenda con sfondo bianco e riquadri colore --- */
+    .info.legend {
+      background: #fff;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #ddd;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.08);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .info.legend h4 {
+      margin: 0 0 6px;
+      font-size: 14px;
+      color: #333;
+      font-weight: 700;
+    }
+    .info.legend i {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      margin-right: 6px;
+      vertical-align: -3px;
+      border: 1px solid rgba(0,0,0,0.25); /* bordo per distinguere i colori chiari */
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top bar: Home a sinistra, Titolo centrato -->
+  <div class="topbar">
+    <nav class="tabs">
+      <a href="index.html">Home</a>
+    </nav>
+    <h1 id="title" class="page-title">Mappa</h1>
+    <div class="right-spacer"></div>
+  </div>
+
+  <!-- Mappa full width -->
+  <div id="mapid"></div>
+
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <script>
+  // Helper: query string
+  function qs(name) {
+    const p = new URLSearchParams(location.search);
+    return p.get(name);
+  }
+
+  // Scala colori verde -> giallo -> rosso -> bordeaux (9 step)
+  function makeGetColor(breaks) {
+    const palette = [
+      '#006400', // verde scuro
+      '#228B22', // verde
+      '#9ACD32', // giallo-verde
+      '#FFD700', // giallo
+      '#FFA500', // arancio
+      '#FF4500', // rosso arancio
+      '#FF0000', // rosso
+      '#B22222', // rosso scuro
+      '#800000'  // bordeaux
+    ];
+    return function(d){
+      if (d == null) return '#D3D3D3';
+      if (d > breaks[breaks.length-1]) return palette[Math.min(breaks.length, palette.length-1)];
+      for (let i = breaks.length - 1; i >= 0; i--) {
+        if (d > breaks[i]) return palette[Math.min(i + 1, palette.length - 1)];
+      }
+      return palette[0];
+    }
+  }
+
+  async function init() {
+    const id = qs('id');
+    if (!id) { document.getElementById('title').textContent = 'Mappa (id mancante)'; return; }
+
+    // Manifest e config
+    const manifest = await (await fetch('./maps_manifest.json')).json();
+    const cfg = manifest.find(x => String(x.id) === String(id));
+    if (!cfg) { document.getElementById('title').textContent = `Mappa non trovata: ${id}`; return; }
+
+    document.title = cfg.title;
+    document.getElementById('title').textContent = cfg.title;
+
+    // Mappa
+    const map = L.map('mapid').setView([42.8, 12.8], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // Dati
+    const [geojson, rows] = await Promise.all([
+      fetch('./NUTS_RG_20M_2021_4326_LEVL_3.geojson').then(r => r.json()),
+      fetch(cfg.data_url).then(r => r.json())
+    ]);
+
+    const byNuts = new Map(
+      rows.map(o => [String(o.NUTS_ID).trim(), parseFloat(String(o.RATE_TIME).replace(',', '.'))])
+    );
+
+    const features = (geojson.features || []).filter(f => f.properties.CNTR_CODE === 'IT' && f.properties.LEVL_CODE === 3);
+    features.forEach(f => {
+      const code = String(f.properties.NUTS_ID).trim();
+      const val = byNuts.get(code);
+      f.properties.rate_time = Number.isFinite(val) ? val : null;
+    });
+
+    const breaks = cfg.breaks || [0,0.5,1,1.5,2,2.5,3];
+    const getColor = makeGetColor(breaks);
+
+    function style(feat) {
+      const v = feat.properties.rate_time;
+      return { fillColor: getColor(v), weight: 1, opacity: 1, color: 'white', dashArray: '3', fillOpacity: 0.7 };
+    }
+
+    L.geoJSON({ type: 'FeatureCollection', features }, {
+      style,
+      onEachFeature: (feature, layer) => {
+        const name = feature.properties.NUTS_NAME;
+        const code = feature.properties.NUTS_ID;
+        const v = feature.properties.rate_time;
+        layer.bindPopup(`<b>${name}</b> (${code})<br/>Valore: ${v !== null ? v.toFixed(3) : 'Dato mancante'}`);
+      }
+    }).addTo(map);
+
+    // Legenda con sfondo bianco e riquadri colore
+    const legend = L.control({ position: 'bottomright' });
+    legend.onAdd = function() {
+      const div = L.DomUtil.create('div', 'info legend');
+      div.innerHTML += `<h4>${cfg.legend_title || 'Tasso'}</h4>`;
+      for (let i = 0; i < breaks.length; i++) {
+        const from = breaks[i], to = breaks[i + 1];
+        div.innerHTML += `<i style="background:${getColor(from + 1e-6)}"></i> ${from}${to ? '&ndash;'+to : '+'}<br>`;
+      }
+      return div;
+    };
+    legend.addTo(map);
+  }
+
+  init();
+  </script>
+</body>
+</html>
